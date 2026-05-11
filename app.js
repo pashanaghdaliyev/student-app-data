@@ -1,13 +1,13 @@
-// Student App Admin Panel — şifrələ + GitHub release yarat
+// Student App Admin Panel — şifrələ + GitHub Contents API ilə fayl yenilə
 //
 // Eyni AES key Flutter app-da və PowerShell skriptində istifadə olunur.
-// DİQQƏT: bu açar dəyişərsə, app-da da dəyişdirilməlidir.
 
 const CONFIG = {
   aesKeyBase64: 'FvMnSyhFLsL+MlhzSFfTjRqQ/d2cstlzGHGZHnE8Y24=',
   repo: 'pashanaghdaliyev/student-app-data',
-  assetName: 'quiz_maker.db.enc',
-  adminCode: '2026',   // bu kodu dəyişə bilərsiniz — sadəcə brauzer tərəfi
+  filePath: 'data/quiz_maker.db.enc',
+  branch: 'main',
+  adminCode: '2026',
 };
 
 // ------------------- helpers -------------------
@@ -19,6 +19,15 @@ function base64ToBytes(b64) {
   const out = new Uint8Array(bin.length);
   for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
   return out;
+}
+
+function bytesToBase64(bytes) {
+  let bin = '';
+  const chunk = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunk) {
+    bin += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
+  }
+  return btoa(bin);
 }
 
 function setMsg(elId, type, text) {
@@ -47,9 +56,7 @@ async function aesEncryptCBC(plaintext, keyBytes) {
 }
 
 async function ghRequest(token, path, options = {}) {
-  const url = path.startsWith('http')
-    ? path
-    : 'https://api.github.com' + path;
+  const url = path.startsWith('http') ? path : 'https://api.github.com' + path;
   const res = await fetch(url, {
     ...options,
     headers: {
@@ -61,25 +68,36 @@ async function ghRequest(token, path, options = {}) {
   });
   if (!res.ok) {
     const body = await res.text();
-    throw new Error(`GitHub API ${res.status}: ${body.substring(0, 200)}`);
+    throw new Error(`GitHub API ${res.status}: ${body.substring(0, 300)}`);
   }
   return res;
 }
 
-async function fetchLatestRelease(token) {
+async function getCurrentFileSha(token) {
+  // Mövcud faylın SHA-ı (yenilənmə üçün lazımdır). Yoxdursa null.
   try {
-    const res = await ghRequest(token, `/repos/${CONFIG.repo}/releases/latest`);
-    return res.json();
+    const res = await ghRequest(token,
+      `/repos/${CONFIG.repo}/contents/${CONFIG.filePath}?ref=${CONFIG.branch}`);
+    const json = await res.json();
+    return json.sha;
   } catch (e) {
-    return null;
+    if (String(e.message).includes('404')) return null;
+    throw e;
   }
 }
 
-function nextVersion(latestTag) {
-  if (!latestTag) return 'v1';
-  const m = String(latestTag).match(/v(\d+)/);
-  if (!m) return 'v1';
-  return 'v' + (parseInt(m[1], 10) + 1);
+async function getLastUpdated(token) {
+  try {
+    const res = await ghRequest(token,
+      `/repos/${CONFIG.repo}/commits?path=${encodeURIComponent(CONFIG.filePath)}&per_page=1`);
+    const arr = await res.json();
+    if (Array.isArray(arr) && arr.length > 0) {
+      return new Date(arr[0].commit.author.date);
+    }
+    return null;
+  } catch (e) {
+    return null;
+  }
 }
 
 // ------------------- login -------------------
@@ -122,7 +140,7 @@ async function doLogin() {
     clearMsg('loginMsg');
     showUploadScreen();
   } catch (e) {
-    setMsg('loginMsg', 'error', 'Token yanlışdır və ya icazəsi yoxdur: ' + e.message);
+    setMsg('loginMsg', 'error', 'Token yanlışdır: ' + e.message);
   }
 }
 
@@ -136,15 +154,14 @@ function doLogout() {
 
 async function showUploadScreen() {
   showCard('upload');
-  $('latestVersion').textContent = 'Son versiya yüklənir...';
+  $('latestVersion').textContent = 'Status yüklənir...';
   const token = localStorage.getItem('gh_token');
-  const latest = await fetchLatestRelease(token);
-  if (latest) {
-    $('latestVersion').innerHTML = `Son versiya: <b>${latest.tag_name}</b> (${new Date(latest.published_at).toLocaleDateString('az')})`;
-    $('version').value = nextVersion(latest.tag_name);
+  const last = await getLastUpdated(token);
+  if (last) {
+    $('latestVersion').innerHTML =
+      `Son yeniləmə: <b>${last.toLocaleString('az')}</b>`;
   } else {
-    $('latestVersion').textContent = 'Hələ release yoxdur';
-    $('version').value = 'v1';
+    $('latestVersion').textContent = 'Sual bazası hələ yüklənməyib';
   }
 }
 
@@ -153,20 +170,11 @@ async function showUploadScreen() {
 async function doUpload() {
   clearMsg('uploadMsg');
   const file = $('dbFile').files[0];
-  const version = $('version').value.trim();
   const notes = $('notes').value.trim() || 'Sualların yenilənməsi';
   const token = localStorage.getItem('gh_token');
 
   if (!file) {
     setMsg('uploadMsg', 'error', 'Fayl seçin');
-    return;
-  }
-  if (!version) {
-    setMsg('uploadMsg', 'error', 'Versiya yazın (məs. v3)');
-    return;
-  }
-  if (!/^v\d+/i.test(version)) {
-    setMsg('uploadMsg', 'error', 'Versiya v1, v2, v3... formatında olmalıdır');
     return;
   }
   if (!token) {
@@ -184,37 +192,31 @@ async function doUpload() {
     const keyBytes = base64ToBytes(CONFIG.aesKeyBase64);
     const encrypted = await aesEncryptCBC(plaintext, keyBytes);
 
-    setMsg('uploadMsg', 'info', `2/3 Release yaradılır (${version})...`);
-    const createRes = await ghRequest(token, `/repos/${CONFIG.repo}/releases`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        tag_name: version,
-        target_commitish: 'main',
-        name: version,
-        body: notes,
-        draft: false,
-        prerelease: false,
-      }),
-    });
-    const release = await createRes.json();
-    const uploadUrl = release.upload_url.replace(
-      /\{[^}]*\}/,
-      `?name=${encodeURIComponent(CONFIG.assetName)}`
-    );
+    setMsg('uploadMsg', 'info', '2/3 Mövcud fayl yoxlanılır...');
+    const currentSha = await getCurrentFileSha(token);
 
-    setMsg('uploadMsg', 'info', `3/3 Fayl yüklənir (${(encrypted.length / 1024 / 1024).toFixed(2)} MB)...`);
-    await ghRequest(token, uploadUrl, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/octet-stream' },
-      body: encrypted,
-    });
+    setMsg('uploadMsg', 'info',
+      `3/3 Yüklənir (${(encrypted.length / 1024 / 1024).toFixed(2)} MB)...`);
+
+    const body = {
+      message: notes,
+      content: bytesToBase64(encrypted),
+      branch: CONFIG.branch,
+    };
+    if (currentSha) body.sha = currentSha;
+
+    await ghRequest(token,
+      `/repos/${CONFIG.repo}/contents/${CONFIG.filePath}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
 
     setMsg('uploadMsg', 'success',
-      `Uğurlu! Versiya ${version} yükləndi. App növbəti açılışda yeni sualları gətirir.`);
+      'Uğurlu! App növbəti açılışda yeni sualları gətirir.');
     $('dbFile').value = '';
-    $('version').value = nextVersion(version);
-    $('latestVersion').innerHTML = `Son versiya: <b>${version}</b> (indi)`;
+    $('latestVersion').innerHTML =
+      `Son yeniləmə: <b>${new Date().toLocaleString('az')}</b>`;
   } catch (e) {
     setMsg('uploadMsg', 'error', 'Xəta: ' + e.message);
   } finally {
@@ -233,12 +235,8 @@ function init() {
   $('adminCode').addEventListener('keydown', (e) => { if (e.key === 'Enter') doLogin(); });
   $('ghToken').addEventListener('keydown', (e) => { if (e.key === 'Enter') doLogin(); });
 
-  // Avtomatik login (yadda saxlanmış token)
   const savedToken = localStorage.getItem('gh_token');
-  if (savedToken) {
-    $('ghToken').value = savedToken;
-    // Kodu da soruşmadan auto-login etməyək — sadəcə tokeni doldur
-  }
+  if (savedToken) $('ghToken').value = savedToken;
 }
 
 init();

@@ -113,17 +113,15 @@
   <label>SQLite fayl (.db)</label>
   <input type="file" id="dbFile" accept=".db,.sqlite,.sqlite3">
 
-  <label>Yeni versiya (avtomatik təklif)</label>
-  <input type="text" id="version" placeholder="v3">
-
-  <label>Qeyd (opsional)</label>
+  <label>Commit mesajı (opsional)</label>
   <input type="text" id="notes" placeholder="Sualların yenilənməsi">
 
   <button type="button" class="primary" id="uploadBtn">Şifrələ və Yüklə</button>
   <div id="uploadMsg"></div>
 
   <div class="note">
-    Hər yükləmə yeni release yaradır. App növbəti açılışda avtomatik yenilənmiş sualları gətirir.
+    Fayl repo-da <code>data/quiz_maker.db.enc</code> kimi yenilənir.
+    App növbəti açılışda yenilənmiş sualları gətirir.
   </div>
 </div>
 
