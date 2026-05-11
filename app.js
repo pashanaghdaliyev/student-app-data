@@ -167,6 +167,12 @@ async function showUploadScreen() {
 
 // ------------------- upload -------------------
 
+function fmtBytes(n) {
+  if (n < 1024) return n + ' B';
+  if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
+  return (n / 1024 / 1024).toFixed(2) + ' MB';
+}
+
 async function doUpload() {
   clearMsg('uploadMsg');
   const file = $('dbFile').files[0];
@@ -186,14 +192,23 @@ async function doUpload() {
   btn.disabled = true;
   btn.textContent = 'İşləyir...';
 
+  let plaintext, encrypted;
   try {
-    setMsg('uploadMsg', 'info', '1/3 Fayl şifrələnir...');
-    const plaintext = new Uint8Array(await file.arrayBuffer());
+    setMsg('uploadMsg', 'info',
+      `Şifrələnir... (seçilmiş fayl: ${fmtBytes(file.size)})`);
+    plaintext = new Uint8Array(await file.arrayBuffer());
+    if (plaintext.length !== file.size) {
+      throw new Error(`Fayl tam oxunmadı (${plaintext.length}/${file.size} bayt)`);
+    }
     const keyBytes = base64ToBytes(CONFIG.aesKeyBase64);
-    const encrypted = await aesEncryptCBC(plaintext, keyBytes);
+    encrypted = await aesEncryptCBC(plaintext, keyBytes);
+    setMsg('uploadMsg', 'info',
+      `Şifrəli: ${fmtBytes(encrypted.length)} (orijinal: ${fmtBytes(plaintext.length)})`);
 
     const contentB64 = bytesToBase64(encrypted);
-    const mbSize = (encrypted.length / 1024 / 1024).toFixed(2);
+    if (contentB64.length < Math.floor(encrypted.length * 1.3)) {
+      throw new Error(`Base64 encoding qısaldı (${contentB64.length}/${encrypted.length})`);
+    }
     // GitHub Contents API eventual consistency: 5 dəfə artan gözləmə ilə cəhd
     const delays = [0, 2000, 4000, 6000, 8000];
     let lastError;
@@ -202,7 +217,7 @@ async function doUpload() {
         await new Promise(r => setTimeout(r, delays[attempt]));
       }
       setMsg('uploadMsg', 'info',
-        `Yüklənir (${mbSize} MB) — cəhd ${attempt + 1}/5...`);
+        `Yüklənir (${fmtBytes(encrypted.length)}) — cəhd ${attempt + 1}/5...`);
 
       const currentSha = await getCurrentFileSha(token);
       const body = {
@@ -230,8 +245,23 @@ async function doUpload() {
       throw new Error('GitHub cache yenilənmir. Bir neçə dəqiqə sonra yenidən cəhd edin.');
     }
 
-    setMsg('uploadMsg', 'success',
-      'Uğurlu! App növbəti açılışda yeni sualları gətirir.');
+    // Server-də faylın həqiqi ölçüsünü oxu — upload-un düzgün olduğunu təsdiq et
+    setMsg('uploadMsg', 'info', 'Server-də yoxlanılır...');
+    let serverSize = null;
+    try {
+      const verify = await ghRequest(token,
+        `/repos/${CONFIG.repo}/contents/${CONFIG.filePath}?ref=${CONFIG.branch}&t=${Date.now()}`);
+      const json = await verify.json();
+      serverSize = json.size;
+    } catch (_) {}
+
+    if (serverSize !== null && Math.abs(serverSize - encrypted.length) > 8) {
+      setMsg('uploadMsg', 'error',
+        `XƏBƏRDARLIQ: Server-də fayl ${fmtBytes(serverSize)}, gözlənilən ${fmtBytes(encrypted.length)}. Yenidən yüklə!`);
+    } else {
+      setMsg('uploadMsg', 'success',
+        `Uğurlu! Server-də: ${fmtBytes(serverSize ?? encrypted.length)}. App növbəti açılışda yeniliyi gətirir.`);
+    }
     $('dbFile').value = '';
     $('latestVersion').innerHTML =
       `Son yeniləmə: <b>${new Date().toLocaleString('az')}</b>`;
