@@ -75,9 +75,15 @@ async function ghRequest(token, path, options = {}) {
 
 async function getCurrentFileSha(token) {
   // Mövcud faylın SHA-ı (yenilənmə üçün lazımdır). Yoxdursa null.
+  // Cache bypass üçün timestamp query və "no-cache" header.
   try {
-    const res = await ghRequest(token,
-      `/repos/${CONFIG.repo}/contents/${CONFIG.filePath}?ref=${CONFIG.branch}`);
+    const url = `/repos/${CONFIG.repo}/contents/${CONFIG.filePath}?ref=${CONFIG.branch}&t=${Date.now()}`;
+    const res = await ghRequest(token, url, {
+      headers: {
+        'Cache-Control': 'no-cache',
+        'If-None-Match': '',
+      },
+    });
     const json = await res.json();
     return json.sha;
   } catch (e) {
@@ -192,13 +198,18 @@ async function doUpload() {
     const keyBytes = base64ToBytes(CONFIG.aesKeyBase64);
     const encrypted = await aesEncryptCBC(plaintext, keyBytes);
 
-    setMsg('uploadMsg', 'info',
-      `2/2 Yüklənir (${(encrypted.length / 1024 / 1024).toFixed(2)} MB)...`);
-
     const contentB64 = bytesToBase64(encrypted);
-    // SHA conflict (409) zamanı 3 dəfəyə kimi retry
+    const mbSize = (encrypted.length / 1024 / 1024).toFixed(2);
+    // GitHub Contents API eventual consistency: 5 dəfə artan gözləmə ilə cəhd
+    const delays = [0, 2000, 4000, 6000, 8000];
     let lastError;
-    for (let attempt = 0; attempt < 3; attempt++) {
+    for (let attempt = 0; attempt < 5; attempt++) {
+      if (delays[attempt] > 0) {
+        await new Promise(r => setTimeout(r, delays[attempt]));
+      }
+      setMsg('uploadMsg', 'info',
+        `Yüklənir (${mbSize} MB) — cəhd ${attempt + 1}/5...`);
+
       const currentSha = await getCurrentFileSha(token);
       const body = {
         message: notes,
@@ -218,11 +229,12 @@ async function doUpload() {
       } catch (e) {
         lastError = e;
         if (!String(e.message).includes('409')) throw e;
-        // 409 = SHA uyğun gəlmədi — gözlə və yenidən cəhd et
-        await new Promise(r => setTimeout(r, 1500));
+        // SHA mismatch — növbəti dövrədə təzə SHA götürərək yenidən cəhd
       }
     }
-    if (lastError) throw lastError;
+    if (lastError) {
+      throw new Error('GitHub cache yenilənmir. Bir neçə dəqiqə sonra yenidən cəhd edin.');
+    }
 
     setMsg('uploadMsg', 'success',
       'Uğurlu! App növbəti açılışda yeni sualları gətirir.');
