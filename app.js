@@ -192,25 +192,37 @@ async function doUpload() {
     const keyBytes = base64ToBytes(CONFIG.aesKeyBase64);
     const encrypted = await aesEncryptCBC(plaintext, keyBytes);
 
-    setMsg('uploadMsg', 'info', '2/3 Mövcud fayl yoxlanılır...');
-    const currentSha = await getCurrentFileSha(token);
-
     setMsg('uploadMsg', 'info',
-      `3/3 Yüklənir (${(encrypted.length / 1024 / 1024).toFixed(2)} MB)...`);
+      `2/2 Yüklənir (${(encrypted.length / 1024 / 1024).toFixed(2)} MB)...`);
 
-    const body = {
-      message: notes,
-      content: bytesToBase64(encrypted),
-      branch: CONFIG.branch,
-    };
-    if (currentSha) body.sha = currentSha;
-
-    await ghRequest(token,
-      `/repos/${CONFIG.repo}/contents/${CONFIG.filePath}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-      });
+    const contentB64 = bytesToBase64(encrypted);
+    // SHA conflict (409) zamanı 3 dəfəyə kimi retry
+    let lastError;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const currentSha = await getCurrentFileSha(token);
+      const body = {
+        message: notes,
+        content: contentB64,
+        branch: CONFIG.branch,
+      };
+      if (currentSha) body.sha = currentSha;
+      try {
+        await ghRequest(token,
+          `/repos/${CONFIG.repo}/contents/${CONFIG.filePath}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+          });
+        lastError = null;
+        break;
+      } catch (e) {
+        lastError = e;
+        if (!String(e.message).includes('409')) throw e;
+        // 409 = SHA uyğun gəlmədi — gözlə və yenidən cəhd et
+        await new Promise(r => setTimeout(r, 1500));
+      }
+    }
+    if (lastError) throw lastError;
 
     setMsg('uploadMsg', 'success',
       'Uğurlu! App növbəti açılışda yeni sualları gətirir.');
