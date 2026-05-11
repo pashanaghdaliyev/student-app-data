@@ -74,16 +74,10 @@ async function ghRequest(token, path, options = {}) {
 }
 
 async function getCurrentFileSha(token) {
-  // Mövcud faylın SHA-ı (yenilənmə üçün lazımdır). Yoxdursa null.
-  // Cache bypass üçün timestamp query və "no-cache" header.
+  // Mövcud faylın SHA-ı. Cache bypass üçün timestamp query.
   try {
     const url = `/repos/${CONFIG.repo}/contents/${CONFIG.filePath}?ref=${CONFIG.branch}&t=${Date.now()}`;
-    const res = await ghRequest(token, url, {
-      headers: {
-        'Cache-Control': 'no-cache',
-        'If-None-Match': '',
-      },
-    });
+    const res = await ghRequest(token, url);
     const json = await res.json();
     return json.sha;
   } catch (e) {
